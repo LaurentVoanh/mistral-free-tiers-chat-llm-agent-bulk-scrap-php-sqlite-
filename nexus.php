@@ -1,6 +1,6 @@
 <?php
 /**
- * NEXUS UNIFIED — Fusion NEXUS + LITECLAW + BULKHOGAN + VOANH
+ * NEXUS UNIFIED v2 — Chat Orchestrator + Multi-Source Search
  * PHP 8.3 | Hostinger Mutualisé | cURL ONLY | 0755/0644
  */
 define('ROOT_PATH', dirname(__FILE__));
@@ -8,9 +8,9 @@ define('DB_PATH', ROOT_PATH . '/data/nexus.sqlite');
 define('LOG_PATH', ROOT_PATH . '/data/nexus.log');
 
 define('MISTRAL_KEYS', [
-    '5qaRaH8Rake',
-    'o3rG1zaShytu',
-    'vEzQaruXkF'
+    '5qaRTjWa5ZbH8Rake',
+    'o3rG1zvdq1ya3eHXRShytu',
+    'vEzQMKaJ30ENDjFruXkF'
 ]);
 define('MISTRAL_ENDPOINT', 'https://api.mistral.ai/v1/chat/completions');
 
@@ -63,6 +63,7 @@ function getDB(): PDO {
             model TEXT,
             ms INTEGER DEFAULT 0,
             status TEXT DEFAULT 'ok',
+            source TEXT,
             payload TEXT,
             response TEXT
         )");
@@ -80,23 +81,15 @@ function getDB(): PDO {
     return $pdo;
 }
 
-// ─── Logging ─────────────────────────────────────────────────────────────────
-function logAction(string $type, string $action, string $model = '', int $ms = 0, string $status = 'ok', string $payload = '', string $response = ''): void {
+function logAction(string $type, string $action, string $model = '', int $ms = 0, string $status = 'ok', string $source = '', string $payload = '', string $response = ''): void {
     try {
         $db = getDB();
-        $stmt = $db->prepare("INSERT INTO logs (type, action, model, ms, status, payload, response) VALUES (?,?,?,?,?,?,?)");
-        $stmt->execute([$type, $action, $model, $ms, $status, mb_substr($payload, 0, 2000), mb_substr($response, 0, 2000)]);
-        // Keep max 500 logs
+        $stmt = $db->prepare("INSERT INTO logs (type, action, model, ms, status, source, payload, response) VALUES (?,?,?,?,?,?,?,?)");
+        $stmt->execute([$type, $action, $model, $ms, $status, $source, mb_substr($payload, 0, 1500), mb_substr($response, 0, 1500)]);
         $db->exec("DELETE FROM logs WHERE id NOT IN (SELECT id FROM logs ORDER BY id DESC LIMIT 500)");
     } catch (Throwable $e) {
         @file_put_contents(LOG_PATH, date('[Y-m-d H:i:s] ') . $e->getMessage() . "\n", FILE_APPEND);
     }
-}
-
-function logError(string $msg): void {
-    $line = date('[Y-m-d H:i:s] ') . $msg . "\n";
-    @file_put_contents(LOG_PATH, $line, FILE_APPEND | LOCK_EX);
-    @chmod(LOG_PATH, 0644);
 }
 
 // ─── cURL ────────────────────────────────────────────────────────────────────
@@ -108,7 +101,7 @@ function curlGet(string $url, array $headers = [], int $timeout = 20): array {
         CURLOPT_FOLLOWLOCATION => true,
         CURLOPT_MAXREDIRS      => 4,
         CURLOPT_TIMEOUT        => $timeout,
-        CURLOPT_USERAGENT      => 'Mozilla/5.0 (compatible; NexusUnified/1.0; +https://web-4.art)',
+        CURLOPT_USERAGENT      => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         CURLOPT_SSL_VERIFYPEER => false,
         CURLOPT_HTTPHEADER     => $headers,
         CURLOPT_ENCODING       => 'gzip, deflate',
@@ -128,7 +121,7 @@ function curlPost(string $url, array $payload, array $headers = [], int $timeout
         CURLOPT_POST           => true,
         CURLOPT_POSTFIELDS     => json_encode($payload),
         CURLOPT_TIMEOUT        => $timeout,
-        CURLOPT_USERAGENT      => 'NexusUnified/1.0 PHP-Agent',
+        CURLOPT_USERAGENT      => 'NexusUnified/2.0 PHP-Agent',
         CURLOPT_SSL_VERIFYPEER => false,
         CURLOPT_HTTPHEADER     => array_merge(['Content-Type: application/json', 'Accept: application/json'], $headers),
     ]);
@@ -157,35 +150,33 @@ function callMistral(array $messages, string $model = 'mistral-small-2603', int 
     $ms = (int)((microtime(true) - $start) * 1000);
     
     if ($res['error']) {
-        logAction('api', 'mistral_error', $model, $ms, 'error', json_encode($payload), $res['error']);
+        logAction('api', 'mistral_error', $model, $ms, 'error', '', json_encode($payload), $res['error']);
         return ['ok' => false, 'error' => 'cURL: ' . $res['error'], 'ms' => $ms];
     }
     if ($res['status'] !== 200) {
-        logAction('api', 'mistral_http_' . $res['status'], $model, $ms, 'error', json_encode($payload), $res['body']);
+        logAction('api', 'mistral_http_' . $res['status'], $model, $ms, 'error', '', json_encode($payload), $res['body']);
         return ['ok' => false, 'error' => 'HTTP ' . $res['status'] . ': ' . mb_substr($res['body'], 0, 200), 'ms' => $ms];
     }
     $data = json_decode($res['body'], true);
     $content = $data['choices'][0]['message']['content'] ?? null;
     if (!$content) {
-        logAction('api', 'mistral_parse', $model, $ms, 'error', json_encode($payload), $res['body']);
+        logAction('api', 'mistral_empty', $model, $ms, 'error', '', '', $res['body']);
         return ['ok' => false, 'error' => 'Réponse vide', 'ms' => $ms];
     }
-    logAction('api', 'mistral_ok', $model, $ms, 'ok', json_encode(['model'=>$model,'tokens'=>$data['usage']['total_tokens']??0]), mb_substr($content, 0, 300));
+    logAction('api', 'mistral_ok', $model, $ms, 'ok', '', $model . ' · ' . ($data['usage']['total_tokens'] ?? 0) . ' tok', mb_substr($content, 0, 200));
     return ['ok' => true, 'content' => $content, 'ms' => $ms, 'usage' => $data['usage'] ?? []];
 }
 
-// ─── Robust JSON parser (gère le texte avant/après JSON, backticks, etc.) ────
+// ─── Robust JSON parser ──────────────────────────────────────────────────────
 function parseJsonRobust(string $raw): ?array {
     $raw = trim($raw);
-    // 1. Essai direct
+    if (!$raw) return null;
     $p = json_decode($raw, true);
     if (is_array($p)) return $p;
-    // 2. Retirer markdown ```json ... ```
     if (preg_match('/```(?:json)?\s*([\s\S]*?)```/i', $raw, $m)) {
         $p = json_decode(trim($m[1]), true);
         if (is_array($p)) return $p;
     }
-    // 3. Chercher premier { ou [ et prendre jusqu'au dernier } ou ]
     $startBrace = strpos($raw, '{');
     $startBracket = strpos($raw, '[');
     $start = false; $endChar = '}';
@@ -204,7 +195,7 @@ function parseJsonRobust(string $raw): ?array {
     return null;
 }
 
-// ─── HTML → texte propre ─────────────────────────────────────────────────────
+// ─── HTML → texte ────────────────────────────────────────────────────────────
 function htmlToText(string $html): string {
     $html = preg_replace('/<(script|style|nav|footer|header|aside|iframe|noscript)[^>]*>.*?<\/\1>/si', '', $html);
     $html = preg_replace('/<!--.*?-->/s', '', $html);
@@ -214,8 +205,43 @@ function htmlToText(string $html): string {
     return trim(mb_substr($html, 0, 8000));
 }
 
-// ─── Web Search (Wikipedia + DuckDuckGo) ─────────────────────────────────────
-function searchWikipedia(string $query, int $limit = 3): array {
+// ═══════════════════════════════════════════════════════════════════════════════
+// 🔍 SEARCH ENGINES — 7 APIs ouvertes sans clé
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// 1. Wikipedia FR — recherche + extrait
+function searchWikipediaFR(string $query, int $limit = 5): array {
+    $url = 'https://fr.wikipedia.org/w/api.php?action=query&list=search&srsearch=' . urlencode($query) . '&srlimit=' . $limit . '&format=json';
+    $res = curlGet($url, [], 10);
+    if ($res['status'] !== 200) return [];
+    $data = json_decode($res['body'], true);
+    $results = [];
+    foreach (($data['query']['search'] ?? []) as $r) {
+        $title = $r['title'] ?? '';
+        // Récupérer l'extrait
+        $extractUrl = 'https://fr.wikipedia.org/w/api.php?action=query&titles=' . urlencode($title) . '&prop=extracts&exintro=1&explaintext=1&format=json';
+        $exRes = curlGet($extractUrl, [], 8);
+        $extract = '';
+        if ($exRes['status'] === 200) {
+            $exData = json_decode($exRes['body'], true);
+            $pages = $exData['query']['pages'] ?? [];
+            foreach ($pages as $page) {
+                $extract = $page['extract'] ?? '';
+                break;
+            }
+        }
+        $results[] = [
+            'title'   => $title,
+            'snippet' => $extract ?: strip_tags($r['snippet'] ?? ''),
+            'url'     => 'https://fr.wikipedia.org/wiki/' . urlencode(str_replace(' ', '_', $title)),
+            'source'  => 'wikipedia_fr'
+        ];
+    }
+    return $results;
+}
+
+// 2. Wikipedia EN — recherche + extrait
+function searchWikipediaEN(string $query, int $limit = 3): array {
     $url = 'https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=' . urlencode($query) . '&srlimit=' . $limit . '&format=json';
     $res = curlGet($url, [], 10);
     if ($res['status'] !== 200) return [];
@@ -225,43 +251,217 @@ function searchWikipedia(string $query, int $limit = 3): array {
         $results[] = [
             'title'   => $r['title'] ?? '',
             'snippet' => strip_tags($r['snippet'] ?? ''),
-            'url'     => 'https://en.wikipedia.org/wiki/' . urlencode(str_replace(' ', '_', $r['title'] ?? ''))
+            'url'     => 'https://en.wikipedia.org/wiki/' . urlencode(str_replace(' ', '_', $r['title'] ?? '')),
+            'source'  => 'wikipedia_en'
         ];
     }
     return $results;
 }
 
-function searchDuckDuckGo(string $query): array {
-    $url = 'https://api.duckduckgo.com/?q=' . urlencode($query) . '&format=json&no_html=1';
-    $res = curlGet($url, [], 10);
-    if ($res['status'] !== 200) return [];
-    $data = json_decode($res['body'], true);
+// 3. Google News RSS — parser XML
+function searchGoogleNews(string $query, int $limit = 8): array {
+    $url = 'https://news.google.com/rss/search?q=' . urlencode($query) . '&hl=fr&gl=FR&ceid=FR:fr';
+    $res = curlGet($url, [], 12);
+    if ($res['status'] !== 200 || !$res['body']) return [];
+    
     $results = [];
-    if (!empty($data['AbstractText'])) {
-        $results[] = ['title' => $data['Heading'] ?? $query, 'snippet' => $data['AbstractText'], 'url' => $data['AbstractURL'] ?? ''];
-    }
-    foreach (($data['RelatedTopics'] ?? []) as $r) {
-        if (isset($r['Text'])) {
-            $results[] = ['title' => mb_substr($r['Text'], 0, 80), 'snippet' => $r['Text'], 'url' => $r['FirstURL'] ?? ''];
-            if (count($results) >= 5) break;
-        }
+    // Parser XML avec SimpleXML
+    libxml_use_internal_errors(true);
+    $xml = simplexml_load_string($res['body'], 'SimpleXMLElement', LIBXML_NOCDATA);
+    if ($xml === false) return [];
+    
+    $count = 0;
+    foreach ($xml->channel->item as $item) {
+        if ($count >= $limit) break;
+        $results[] = [
+            'title'   => (string)($item->title ?? ''),
+            'snippet' => strip_tags((string)($item->description ?? '')),
+            'url'     => (string)($item->link ?? ''),
+            'date'    => (string)($item->pubDate ?? ''),
+            'source'  => 'google_news'
+        ];
+        $count++;
     }
     return $results;
 }
 
-function searchNews(string $query): array {
-    // Wikipedia Current Events + Google News RSS via proxy
-    $url = 'https://en.wikipedia.org/w/api.php?action=parse&page=Portal:Current_events&prop=text&format=json';
-    $res = curlGet($url, [], 10);
-    if ($res['status'] !== 200) return [];
-    $data = json_decode($res['body'], true);
-    $html = $data['parse']['text']['*'] ?? '';
-    $text = strip_tags($html);
-    $text = preg_replace('/\s{2,}/', ' ', $text);
-    return [['title' => 'Actualités Wikipedia', 'snippet' => mb_substr($text, 0, 500), 'url' => 'https://en.wikipedia.org/wiki/Portal:Current_events']];
+// 4. Arxiv — papiers scientifiques
+function searchArxiv(string $query, int $limit = 5): array {
+    $url = 'http://export.arxiv.org/api/query?search_query=all:' . urlencode($query) . '&start=0&max_results=' . $limit;
+    $res = curlGet($url, [], 15);
+    if ($res['status'] !== 200 || !$res['body']) return [];
+    
+    $results = [];
+    libxml_use_internal_errors(true);
+    $xml = simplexml_load_string($res['body'], 'SimpleXMLElement', LIBXML_NOCDATA);
+    if ($xml === false) return [];
+    
+    $xml->registerXPathNamespace('atom', 'http://www.w3.org/2005/Atom');
+    $xml->registerXPathNamespace('arxiv', 'http://arxiv.org/schemas/atom');
+    
+    foreach ($xml->entry as $entry) {
+        $results[] = [
+            'title'   => trim((string)($entry->title ?? '')),
+            'snippet' => trim((string)($entry->summary ?? '')),
+            'url'     => (string)($entry->id ?? ''),
+            'authors' => implode(', ', array_map(function($a) { return (string)$a->name; }, $entry->author ?? [])),
+            'date'    => (string)($entry->published ?? ''),
+            'source'  => 'arxiv'
+        ];
+    }
+    return $results;
 }
 
-// ─── AJAX Router ─────────────────────────────────────────────────────────────
+// 5. OpenAlex — recherche académique large
+function searchOpenAlex(string $query, int $limit = 5): array {
+    $url = 'https://api.openalex.org/works?search=' . urlencode($query) . '&per_page=' . $limit . '&mailto=nexus@example.com';
+    $res = curlGet($url, [], 12);
+    if ($res['status'] !== 200) return [];
+    $data = json_decode($res['body'], true);
+    $results = [];
+    foreach (($data['results'] ?? []) as $work) {
+        $results[] = [
+            'title'   => $work['title'] ?? '',
+            'snippet' => $work['abstract_inverted_index'] ? '(abstract disponible)' : ($work['biblio'] ? 'Publication académique' : ''),
+            'url'     => $work['doi'] ?? $work['id'] ?? '',
+            'authors' => implode(', ', array_slice(array_column($work['authorships'] ?? [], 'author'), 0, 3)),
+            'date'    => $work['publication_year'] ?? '',
+            'source'  => 'openalex',
+            'citations' => $work['cited_by_count'] ?? 0
+        ];
+    }
+    return $results;
+}
+
+// 6. CrossRef — publications avec DOI
+function searchCrossRef(string $query, int $limit = 5): array {
+    $url = 'https://api.crossref.org/works?query=' . urlencode($query) . '&rows=' . $limit;
+    $res = curlGet($url, [], 12);
+    if ($res['status'] !== 200) return [];
+    $data = json_decode($res['body'], true);
+    $results = [];
+    foreach (($data['message']['items'] ?? []) as $item) {
+        $title = $item['title'][0] ?? '';
+        $authors = array_map(function($a) { return ($a['given'] ?? '') . ' ' . ($a['family'] ?? ''); }, $item['author'] ?? []);
+        $results[] = [
+            'title'   => $title,
+            'snippet' => ($item['type'] ?? 'article') . ' · ' . ($item['publisher'] ?? ''),
+            'url'     => $item['DOI'] ? 'https://doi.org/' . $item['DOI'] : '',
+            'authors' => implode(', ', array_slice($authors, 0, 3)),
+            'date'    => $item['published-print']['date-parts'][0][0] ?? $item['published-online']['date-parts'][0][0] ?? '',
+            'source'  => 'crossref'
+        ];
+    }
+    return $results;
+}
+
+// 7. PubMed — biomédical
+function searchPubMed(string $query, int $limit = 5): array {
+    // Étape 1 : chercher les IDs
+    $searchUrl = 'https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=pubmed&term=' . urlencode($query) . '&retmax=' . $limit . '&retmode=json';
+    $res = curlGet($searchUrl, [], 12);
+    if ($res['status'] !== 200) return [];
+    $data = json_decode($res['body'], true);
+    $ids = $data['esearchresult']['idlist'] ?? [];
+    if (empty($ids)) return [];
+    
+    // Étape 2 : récupérer les détails
+    $fetchUrl = 'https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi?db=pubmed&id=' . implode(',', $ids) . '&retmode=json';
+    $res2 = curlGet($fetchUrl, [], 12);
+    if ($res2['status'] !== 200) return [];
+    $data2 = json_decode($res2['body'], true);
+    
+    $results = [];
+    foreach ($ids as $id) {
+        $item = $data2['result'][$id] ?? [];
+        if (empty($item)) continue;
+        $authors = array_column($item['authors'] ?? [], 'name');
+        $results[] = [
+            'title'   => $item['title'] ?? '',
+            'snippet' => 'PubMed ID: ' . $id . ' · ' . ($item['source'] ?? ''),
+            'url'     => 'https://pubmed.ncbi.nlm.nih.gov/' . $id . '/',
+            'authors' => implode(', ', array_slice($authors, 0, 3)),
+            'date'    => $item['pubdate'] ?? '',
+            'source'  => 'pubmed'
+        ];
+    }
+    return $results;
+}
+
+// Recherche unifiée multi-sources
+function unifiedSearch(string $query, array $sources = ['wikipedia_fr', 'google_news']): array {
+    $all = [];
+    $sourceMap = [
+        'wikipedia_fr' => 'searchWikipediaFR',
+        'wikipedia_en' => 'searchWikipediaEN',
+        'google_news'  => 'searchGoogleNews',
+        'arxiv'        => 'searchArxiv',
+        'openalex'     => 'searchOpenAlex',
+        'crossref'     => 'searchCrossRef',
+        'pubmed'       => 'searchPubMed',
+    ];
+    foreach ($sources as $src) {
+        if (isset($sourceMap[$src])) {
+            $start = microtime(true);
+            try {
+                $results = $sourceMap[$src]($query, 5);
+                $ms = (int)((microtime(true) - $start) * 1000);
+                logAction('search', $src, '', $ms, 'ok', $src, $query, count($results) . ' résultats');
+                $all = array_merge($all, $results);
+            } catch (Throwable $e) {
+                logAction('search', $src . '_error', '', 0, 'error', $src, $query, $e->getMessage());
+            }
+        }
+    }
+    return $all;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 🎯 ACTION ORCHESTRATOR — L'IA propose des actions exécutables
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Demande à l'IA d'analyser la requête et proposer des actions
+function suggestActions(string $message, string $context = ''): array {
+    $sysPrompt = "Tu es un orchestrateur d'actions IA. Analyse la demande utilisateur et propose des actions concrètes.
+Réponds UNIQUEMENT en JSON valide (sans markdown, sans texte avant/après) :
+{
+  \"intent\": \"description courte de l'intention\",
+  \"actions\": [
+    {\"type\": \"search\", \"query\": \"requête optimisée\", \"sources\": [\"wikipedia_fr\", \"google_news\", \"arxiv\"], \"label\": \"Rechercher sur...\"},
+    {\"type\": \"scrape\", \"url\": \"https://...\", \"label\": \"Analyser cette URL\"},
+    {\"type\": \"bulk\", \"questions\": [\"Q1?\", \"Q2?\", \"Q3?\"], \"system_prompt\": \"prompt\", \"label\": \"Générer X variations\"},
+    {\"type\": \"answer\", \"content\": \"réponse directe si possible\"}
+  ]
+}
+
+Types d'actions possibles :
+- search : recherche web multi-sources (wikipedia_fr, wikipedia_en, google_news, arxiv, openalex, crossref, pubmed)
+- scrape : analyse d'URL
+- bulk : traitement par lot (l'IA génère les questions)
+- answer : réponse directe
+
+Si la demande est simple, mets juste une action \"answer\".
+Si elle nécessite de la recherche, propose \"search\" avec les bonnes sources.
+Si elle demande plusieurs variations/générations, propose \"bulk\".
+Si elle mentionne une URL, propose \"scrape\".
+Tu peux proposer plusieurs actions combinées.";
+
+    $ai = callMistral([
+        ['role' => 'system', 'content' => $sysPrompt],
+        ['role' => 'user', 'content' => $context . "\nDemande: " . $message]
+    ], 'mistral-small-2603', 800, 0.4);
+    
+    if (!$ai['ok']) return ['intent' => '', 'actions' => [['type' => 'answer', 'content' => 'Erreur: ' . $ai['error']]]];
+    $parsed = parseJsonRobust($ai['content']);
+    if (!$parsed || !isset($parsed['actions'])) {
+        return ['intent' => '', 'actions' => [['type' => 'answer', 'content' => $ai['content']]]];
+    }
+    return $parsed;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 🌐 AJAX ROUTER
+// ═══════════════════════════════════════════════════════════════════════════════
 header('Content-Type: application/json; charset=utf-8');
 $input = json_decode(file_get_contents('php://input'), true) ?? [];
 $action = $input['action'] ?? ($_GET['action'] ?? '');
@@ -283,13 +483,12 @@ try {
 
     // ── LOGS ───────────────────────────────────────────────────────────────
     if ($action === 'logs') {
-        $limit = (int)($input['limit'] ?? 100);
+        $limit = min(300, (int)($input['limit'] ?? 150));
         $stmt = $db->prepare("SELECT * FROM logs ORDER BY id DESC LIMIT ?");
         $stmt->execute([$limit]);
         echo json_encode(['ok' => true, 'logs' => $stmt->fetchAll(PDO::FETCH_ASSOC)]);
         exit;
     }
-
     if ($action === 'clear_logs') {
         $db->exec("DELETE FROM logs");
         echo json_encode(['ok' => true]);
@@ -302,7 +501,6 @@ try {
         echo json_encode(['ok' => true, 'sessions' => $stmt->fetchAll(PDO::FETCH_ASSOC)]);
         exit;
     }
-
     if ($action === 'new_session') {
         $key = bin2hex(random_bytes(8));
         $model = $input['model'] ?? 'mistral-small-2603';
@@ -312,26 +510,34 @@ try {
         echo json_encode(['ok' => true, 'session' => $key]);
         exit;
     }
-
     if ($action === 'delete_session') {
-        $key = $input['session'] ?? '';
         $stmt = $db->prepare("DELETE FROM sessions WHERE session_key = ?");
-        $stmt->execute([$key]);
+        $stmt->execute([$input['session'] ?? '']);
         echo json_encode(['ok' => true]);
         exit;
     }
+    if ($action === 'load_session') {
+        $stmt = $db->prepare("SELECT conversation FROM sessions WHERE session_key = ? LIMIT 1");
+        $stmt->execute([$input['session'] ?? '']);
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+        echo json_encode(['ok' => true, 'conversation' => $row ? json_decode($row['conversation'], true) : []]);
+        exit;
+    }
 
-    // ── SEARCH (Wikipedia + DDG + News) ────────────────────────────────────
+    // ── UNIFIED SEARCH ─────────────────────────────────────────────────────
     if ($action === 'search') {
         $q = trim($input['query'] ?? '');
+        $sources = $input['sources'] ?? ['wikipedia_fr', 'google_news'];
         if (!$q) { echo json_encode(['ok' => false, 'error' => 'Query vide']); exit; }
         $start = microtime(true);
-        $wiki = searchWikipedia($q, 3);
-        $ddg = searchDuckDuckGo($q);
-        $news = searchNews($q);
+        $results = unifiedSearch($q, $sources);
         $ms = (int)((microtime(true) - $start) * 1000);
-        logAction('search', 'web_search', '', $ms, 'ok', $q, json_encode(['wiki'=>count($wiki),'ddg'=>count($ddg),'news'=>count($news)]));
-        echo json_encode(['ok' => true, 'wiki' => $wiki, 'ddg' => $ddg, 'news' => $news, 'ms' => $ms]);
+        // Grouper par source
+        $grouped = [];
+        foreach ($results as $r) {
+            $grouped[$r['source']][] = $r;
+        }
+        echo json_encode(['ok' => true, 'results' => $results, 'grouped' => $grouped, 'total' => count($results), 'ms' => $ms]);
         exit;
     }
 
@@ -342,7 +548,7 @@ try {
         $start = microtime(true);
         $res = curlGet($url, [], 18);
         if ($res['error'] || $res['status'] < 200 || $res['status'] >= 400) {
-            logAction('scrape', 'scrape_fail', '', (int)((microtime(true)-$start)*1000), 'error', $url, $res['error'] . ' HTTP ' . $res['status']);
+            logAction('scrape', 'fail', '', 0, 'error', '', $url, $res['error'] . ' HTTP ' . $res['status']);
             echo json_encode(['ok' => false, 'error' => 'HTTP ' . $res['status'] . ' - ' . $res['error']]);
             exit;
         }
@@ -351,106 +557,19 @@ try {
             echo json_encode(['ok' => false, 'error' => 'Contenu trop court']);
             exit;
         }
-        // Analyse IA
-        $sysPrompt = "Tu es un analyste web. Réponds UNIQUEMENT en JSON valide (sans markdown, sans texte avant/après) :
-{\"summary\":\"Résumé en 3-5 phrases\",\"topics\":[\"t1\",\"t2\",\"t3\"],\"questions\":[\"Q1?\",\"Q2?\",\"Q3?\",\"Q4?\",\"Q5?\"]}";
+        $sysPrompt = "Analyse ce contenu web. Réponds UNIQUEMENT en JSON valide (sans markdown) :
+{\"summary\":\"Résumé en 3-5 phrases\",\"topics\":[\"t1\",\"t2\",\"t3\"],\"questions\":[\"Q1?\",\"Q2?\",\"Q3?\",\"Q4?\",\"Q5?\"],\"entities\":[\"personnes/organisations mentionnées\"]}";
         $ai = callMistral([
             ['role' => 'system', 'content' => $sysPrompt],
-            ['role' => 'user',   'content' => "URL: $url\n---\n" . mb_substr($text, 0, 6000) . "\n---\nAnalyse et génère le JSON."]
+            ['role' => 'user', 'content' => "URL: $url\n---\n" . mb_substr($text, 0, 6000)]
         ], 'mistral-small-2603', 900, 0.5);
         $ms = (int)((microtime(true) - $start) * 1000);
         $parsed = $ai['ok'] ? parseJsonRobust($ai['content']) : null;
         if (!$parsed || !isset($parsed['summary'])) {
-            $parsed = ['summary' => $ai['content'] ?? 'Analyse échouée', 'topics' => [], 'questions' => []];
+            $parsed = ['summary' => $ai['content'] ?? 'Analyse échouée', 'topics' => [], 'questions' => [], 'entities' => []];
         }
-        logAction('scrape', 'scrape_ok', 'mistral-small-2603', $ms, 'ok', $url, $parsed['summary']);
-        echo json_encode(['ok' => true, 'url' => $url, 'summary' => $parsed['summary'], 'topics' => $parsed['topics'] ?? [], 'questions' => $parsed['questions'] ?? [], 'text_length' => mb_strlen($text), 'ms' => $ms]);
-        exit;
-    }
-
-    // ── CHAT (avec recherche web optionnelle) ─────────────────────────────
-    if ($action === 'chat') {
-        $session = trim($input['session'] ?? '');
-        $message = trim($input['message'] ?? '');
-        $model = $input['model'] ?? 'mistral-small-2603';
-        $webSearch = !empty($input['web_search']);
-        $agentId = $input['agent_id'] ?? null;
-        if (!$session || !$message) { echo json_encode(['ok' => false, 'error' => 'Session/message manquant']); exit; }
-
-        $stmt = $db->prepare("SELECT * FROM sessions WHERE session_key = ? LIMIT 1");
-        $stmt->execute([$session]);
-        $sess = $stmt->fetch(PDO::FETCH_ASSOC);
-        if (!$sess) { echo json_encode(['ok' => false, 'error' => 'Session introuvable']); exit; }
-
-        $conversation = json_decode($sess['conversation'] ?: '[]', true) ?: [];
-        
-        // Agent system prompt
-        $systemContent = "Tu es NEXUS, un assistant IA avancé. Réponds en français, sois précis et structuré.";
-        if ($agentId) {
-            $stmtA = $db->prepare("SELECT * FROM agents WHERE id = ?");
-            $stmtA->execute([$agentId]);
-            $agent = $stmtA->fetch(PDO::FETCH_ASSOC);
-            if ($agent && !empty($agent['system_prompt'])) {
-                $systemContent = $agent['system_prompt'];
-                if (!empty($agent['model'])) $model = $agent['model'];
-            }
-        }
-
-        // Recherche web si demandée
-        $webContext = '';
-        if ($webSearch) {
-            $wiki = searchWikipedia($message, 2);
-            $ddg = searchDuckDuckGo($message);
-            if (!empty($wiki) || !empty($ddg)) {
-                $webContext = "\n\n[CONTEXTE WEB - Résultats de recherche]\n";
-                foreach ($wiki as $w) $webContext .= "• Wikipedia - {$w['title']}: {$w['snippet']}\n";
-                foreach ($ddg as $d) $webContext .= "• Web - {$d['title']}: {$d['snippet']}\n";
-                $webContext .= "[/CONTEXTE WEB]\n";
-            }
-        }
-
-        // Build messages
-        $messages = [['role' => 'system', 'content' => $systemContent . $webContext]];
-        foreach ($conversation as $m) $messages[] = $m;
-        $messages[] = ['role' => 'user', 'content' => $message];
-
-        $ai = callMistral($messages, $model, 1500, 0.7);
-        if (!$ai['ok']) { echo json_encode(['ok' => false, 'error' => $ai['error']]); exit; }
-
-        $answer = $ai['content'];
-        $conversation[] = ['role' => 'user', 'content' => $message];
-        $conversation[] = ['role' => 'assistant', 'content' => $answer];
-        // Trim conversation (max 20 messages)
-        if (count($conversation) > 20) {
-            $conversation = array_slice($conversation, -20);
-        }
-        // Update title if first message
-        $title = $sess['title'];
-        if ($title === 'Nouvelle conversation') {
-            $title = mb_substr($message, 0, 50);
-        }
-        $stmt = $db->prepare("UPDATE sessions SET conversation=?, title=?, model=?, updated_at=CURRENT_TIMESTAMP WHERE session_key=?");
-        $stmt->execute([json_encode($conversation), $title, $model, $session]);
-
-        // Generate follow-up questions
-        $qAi = callMistral([
-            ['role' => 'system', 'content' => "Génère 3 questions de suivi pertinentes. Réponds UNIQUEMENT en JSON array (sans markdown, sans texte) : [\"Q1?\",\"Q2?\",\"Q3?\"]"],
-            ['role' => 'user', 'content' => "Contexte: $message\nRéponse: " . mb_substr($answer, 0, 500)]
-        ], 'mistral-small-2506', 200, 0.6);
-        $questions = [];
-        if ($qAi['ok']) {
-            $pq = parseJsonRobust($qAi['content']);
-            if (is_array($pq)) $questions = array_slice($pq, 0, 3);
-        }
-
-        echo json_encode([
-            'ok' => true,
-            'answer' => $answer,
-            'questions' => $questions,
-            'model' => $model,
-            'ms' => $ai['ms'],
-            'web_used' => $webSearch && !empty($webContext)
-        ]);
+        logAction('scrape', 'ok', 'mistral-small-2603', $ms, 'ok', '', $url, $parsed['summary']);
+        echo json_encode(['ok' => true, 'url' => $url, 'summary' => $parsed['summary'], 'topics' => $parsed['topics'] ?? [], 'questions' => $parsed['questions'] ?? [], 'entities' => $parsed['entities'] ?? [], 'text_length' => mb_strlen($text), 'ms' => $ms]);
         exit;
     }
 
@@ -476,10 +595,97 @@ try {
                 'ms' => $ai['ms'] ?? 0,
                 'ok' => $ai['ok']
             ];
-            // Petit délai pour éviter rate limit
-            usleep(200000);
+            usleep(150000);
         }
+        logAction('bulk', 'complete', $model, 0, 'ok', '', count($questions) . ' questions', count($results) . ' réponses');
         echo json_encode(['ok' => true, 'results' => $results]);
+        exit;
+    }
+
+    // ── ORCHESTRATE — L'IA analyse et propose des actions ──────────────────
+    if ($action === 'orchestrate') {
+        $message = trim($input['message'] ?? '');
+        if (!$message) { echo json_encode(['ok' => false, 'error' => 'Message vide']); exit; }
+        $orch = suggestActions($message);
+        echo json_encode(['ok' => true, 'orchestration' => $orch]);
+        exit;
+    }
+
+    // ── CHAT (avec mode orchestrator) ──────────────────────────────────────
+    if ($action === 'chat') {
+        $session = trim($input['session'] ?? '');
+        $message = trim($input['message'] ?? '');
+        $model = $input['model'] ?? 'mistral-small-2603';
+        $orchestrator = !empty($input['orchestrator']);
+        $agentId = $input['agent_id'] ?? null;
+        if (!$session || !$message) { echo json_encode(['ok' => false, 'error' => 'Session/message manquant']); exit; }
+
+        $stmt = $db->prepare("SELECT * FROM sessions WHERE session_key = ? LIMIT 1");
+        $stmt->execute([$session]);
+        $sess = $stmt->fetch(PDO::FETCH_ASSOC);
+        if (!$sess) { echo json_encode(['ok' => false, 'error' => 'Session introuvable']); exit; }
+
+        $conversation = json_decode($sess['conversation'] ?: '[]', true) ?: [];
+        
+        $systemContent = "Tu es NEXUS, un assistant IA avancé. Réponds en français, sois précis et structuré. Utilise le markdown pour formater.";
+        if ($orchestrator) {
+            $systemContent .= "\n\nTu as accès à des outils que tu peux proposer à l'utilisateur via un bloc JSON à la fin de ta réponse. Format :
+[[[ACTIONS]]]
+{\"actions\":[{\"type\":\"search\",\"query\":\"...\",\"sources\":[\"wikipedia_fr\",\"google_news\"],\"label\":\"...\"},{\"type\":\"scrape\",\"url\":\"...\",\"label\":\"...\"},{\"type\":\"bulk\",\"questions\":[...],\"system_prompt\":\"...\",\"label\":\"...\"}]}
+[[[/ACTIONS]]]
+
+Utilise ces actions quand c'est pertinent :
+- search : pour rechercher des infos (sources: wikipedia_fr, wikipedia_en, google_news, arxiv, openalex, crossref, pubmed)
+- scrape : pour analyser une URL mentionnée
+- bulk : pour générer plusieurs variations/réponses en parallèle
+- Tu peux combiner plusieurs actions.";
+        }
+        if ($agentId) {
+            $stmtA = $db->prepare("SELECT * FROM agents WHERE id = ?");
+            $stmtA->execute([$agentId]);
+            $agent = $stmtA->fetch(PDO::FETCH_ASSOC);
+            if ($agent && !empty($agent['system_prompt'])) {
+                $systemContent = $agent['system_prompt'];
+                if (!empty($agent['model'])) $model = $agent['model'];
+            }
+        }
+
+        $messages = [['role' => 'system', 'content' => $systemContent]];
+        foreach ($conversation as $m) $messages[] = $m;
+        $messages[] = ['role' => 'user', 'content' => $message];
+
+        $ai = callMistral($messages, $model, 1800, 0.7);
+        if (!$ai['ok']) { echo json_encode(['ok' => false, 'error' => $ai['error']]); exit; }
+
+        $answer = $ai['content'];
+        
+        // Extraire le bloc d'actions s'il existe
+        $actions = [];
+        if (preg_match('/\[\[\[ACTIONS\]\]\]([\s\S]*?)\[\[\[\/ACTIONS\]\]\]/', $answer, $m)) {
+            $parsed = parseJsonRobust($m[1]);
+            if ($parsed && isset($parsed['actions'])) {
+                $actions = $parsed['actions'];
+            }
+            // Retirer le bloc de la réponse affichée
+            $answer = trim(str_replace($m[0], '', $answer));
+        }
+
+        $conversation[] = ['role' => 'user', 'content' => $message];
+        $conversation[] = ['role' => 'assistant', 'content' => $answer];
+        if (count($conversation) > 20) $conversation = array_slice($conversation, -20);
+        
+        $title = $sess['title'];
+        if ($title === 'Nouvelle conversation') $title = mb_substr($message, 0, 50);
+        $stmt = $db->prepare("UPDATE sessions SET conversation=?, title=?, model=?, updated_at=CURRENT_TIMESTAMP WHERE session_key=?");
+        $stmt->execute([json_encode($conversation), $title, $model, $session]);
+
+        echo json_encode([
+            'ok' => true,
+            'answer' => $answer,
+            'actions' => $actions,
+            'model' => $model,
+            'ms' => $ai['ms']
+        ]);
         exit;
     }
 
@@ -490,21 +696,20 @@ try {
         exit;
     }
     if ($action === 'agents_save') {
-        $name = trim($input['name'] ?? '');
-        $role = trim($input['role'] ?? '');
-        $prompt = trim($input['system_prompt'] ?? '');
-        $model = $input['model'] ?? 'mistral-small-2603';
-        $temp = (float)($input['temperature'] ?? 0.7);
-        if (!$name || !$prompt) { echo json_encode(['ok' => false, 'error' => 'Nom/prompt requis']); exit; }
         $stmt = $db->prepare("INSERT INTO agents (name, role, system_prompt, model, temperature) VALUES (?,?,?,?,?)");
-        $stmt->execute([$name, $role, $prompt, $model, $temp]);
+        $stmt->execute([
+            trim($input['name'] ?? ''),
+            trim($input['role'] ?? ''),
+            trim($input['system_prompt'] ?? ''),
+            $input['model'] ?? 'mistral-small-2603',
+            (float)($input['temperature'] ?? 0.7)
+        ]);
         echo json_encode(['ok' => true, 'id' => $db->lastInsertId()]);
         exit;
     }
     if ($action === 'agents_delete') {
-        $id = (int)($input['id'] ?? 0);
         $stmt = $db->prepare("DELETE FROM agents WHERE id = ?");
-        $stmt->execute([$id]);
+        $stmt->execute([(int)($input['id'] ?? 0)]);
         echo json_encode(['ok' => true]);
         exit;
     }
@@ -515,15 +720,15 @@ try {
         $logs = $db->query("SELECT COUNT(*) FROM logs")->fetchColumn();
         $agents = $db->query("SELECT COUNT(*) FROM agents")->fetchColumn();
         $apiCalls = $db->query("SELECT COUNT(*) FROM logs WHERE type='api'")->fetchColumn();
-        $avgMs = $db->query("SELECT AVG(ms) FROM logs WHERE type='api' AND ms>0")->fetchColumn();
-        echo json_encode(['ok' => true, 'sessions' => (int)$sessions, 'logs' => (int)$logs, 'agents' => (int)$agents, 'api_calls' => (int)$apiCalls, 'avg_ms' => (int)$avgMs]);
+        $avgMs = (int)$db->query("SELECT AVG(ms) FROM logs WHERE type='api' AND ms>0")->fetchColumn();
+        $searchCalls = $db->query("SELECT COUNT(*) FROM logs WHERE type='search'")->fetchColumn();
+        echo json_encode(['ok' => true, 'sessions' => (int)$sessions, 'logs' => (int)$logs, 'agents' => (int)$agents, 'api_calls' => (int)$apiCalls, 'avg_ms' => $avgMs, 'search_calls' => (int)$searchCalls]);
         exit;
     }
 
     echo json_encode(['ok' => false, 'error' => 'Action inconnue: ' . $action]);
 
 } catch (Throwable $e) {
-    logError($e->getMessage() . ' in ' . $e->getFile() . ':' . $e->getLine());
-    logAction('error', 'exception', '', 0, 'error', '', $e->getMessage());
+    logAction('error', 'exception', '', 0, 'error', '', $e->getFile() . ':' . $e->getLine(), $e->getMessage());
     echo json_encode(['ok' => false, 'error' => 'Erreur serveur: ' . $e->getMessage()]);
 }
